@@ -48,7 +48,7 @@ class CommonAgent(a2c_continuous.A2CAgent):
     def __init__(self, base_name, config):
         a2c_common.A2CBase.__init__(self, base_name, config)
 
-        self._load_config_params(config)
+        self._load_config_params(config) # 读取yaml文件中的参数，比如学习率、损失系数
 
         self.is_discrete = False
         self._setup_action_space()
@@ -57,16 +57,16 @@ class CommonAgent(a2c_continuous.A2CAgent):
         self._save_intermediate = config.get('save_intermediate', False)
 
         net_config = self._build_net_config()
-        self.model = self.network.build(net_config)
+        self.model = self.network.build(net_config) # 配置actor和critic网络的具体结构
         self.model.to(self.ppo_device)
         self.states = None
 
         self.init_rnn_from_model(self.model)
         self.last_lr = float(self.last_lr)
-
+        # 使用adam优化器更新网络参数
         self.optimizer = optim.Adam(self.model.parameters(), float(self.last_lr), eps=1e-08, weight_decay=self.weight_decay)
 
-        if self.normalize_input:
+        if self.normalize_input: # 准备好输入归一化工具runningmeanstd
             obs_shape = torch_ext.shape_whc_to_cwh(self.obs_shape)
             self.running_mean_std = RunningMeanStd(obs_shape).to(self.ppo_device)
 
@@ -88,6 +88,7 @@ class CommonAgent(a2c_continuous.A2CAgent):
             self.central_value_net = central_value.CentralValueTrain(**cv_config).to(self.ppo_device)
 
         self.use_experimental_cv = self.config.get('use_experimental_cv', True)
+        # 准备好数据存储AMPDataset工具
         self.dataset = amp_datasets.AMPDataset(self.batch_size, self.minibatch_size, self.is_discrete, self.is_rnn, self.ppo_device, self.seq_len)
         self.algo_observer.after_init(self)
         
@@ -138,9 +139,9 @@ class CommonAgent(a2c_continuous.A2CAgent):
 
         self._init_train()
 
-        while True:
-            epoch_num = self.update_epoch()
-            train_info = self.train_epoch() # core
+        while True: #巨大的while循环，控制整个训练流程
+            epoch_num = self.update_epoch() #更新当前是第几轮epoch
+            train_info = self.train_epoch() # core 执行一轮完整的训练
 
             sum_time = train_info['total_time']
             total_time += sum_time
@@ -148,7 +149,7 @@ class CommonAgent(a2c_continuous.A2CAgent):
             if self.multi_gpu:
                 self.hvd.sync_stats(self)
 
-            if self.rank == 0:
+            if self.rank == 0:  # 日志记录（在主进程中执行）
                 scaled_time = sum_time
                 scaled_play_time = train_info['play_time']
                 curr_frames = self.curr_frames
@@ -157,7 +158,7 @@ class CommonAgent(a2c_continuous.A2CAgent):
                     fps_step = curr_frames / scaled_play_time
                     fps_total = curr_frames / scaled_time
                     print("epoch_num:{}".format(epoch_num), "mean_rewards:{}".format(self._get_mean_rewards()), f'fps step: {fps_step:.1f} fps total: {fps_total:.1f}')
-
+                # 计算FPS等性能指标
                 self.writer.add_scalar('performance/total_fps', curr_frames / scaled_time, frame)
                 self.writer.add_scalar('performance/step_fps', curr_frames / scaled_play_time, frame)
                 self.writer.add_scalar('info/epochs', epoch_num, frame)
@@ -179,7 +180,7 @@ class CommonAgent(a2c_continuous.A2CAgent):
 
                     if self.has_self_play_config:
                         self.self_play_manager.update(self)
-
+                # 保存模型
                 if self.save_freq > 0:
                     if (epoch_num % self.save_freq == 0):
                         self.save(model_output_file)
@@ -214,8 +215,9 @@ class CommonAgent(a2c_continuous.A2CAgent):
 
         return
 
-    def train_epoch(self):
+    def train_epoch(self):  # 完成一次采集-学习的闭环
         play_time_start = time.time()
+        # step 1 采集数据
         with torch.no_grad():
             if self.is_rnn:
                 batch_dict = self.play_steps_rnn()
@@ -226,10 +228,10 @@ class CommonAgent(a2c_continuous.A2CAgent):
         update_time_start = time.time()
         rnn_masks = batch_dict.get('rnn_masks', None)
         
-        self.set_train()
+        self.set_train() # 将模型切换到训练模式
 
         self.curr_frames = batch_dict.pop('played_frames')
-        self.prepare_dataset(batch_dict)
+        self.prepare_dataset(batch_dict) # step2: 准备数据集
         self.algo_observer.after_steps()
 
         if self.has_central_value:
@@ -241,10 +243,10 @@ class CommonAgent(a2c_continuous.A2CAgent):
             frames_mask_ratio = rnn_masks.sum().item() / (rnn_masks.nelement())
             print(frames_mask_ratio)
 
-        for _ in range(0, self.mini_epochs_num):
+        for _ in range(0, self.mini_epochs_num): # step3: 多次更新网络，mini_batch训练
             ep_kls = []
             for i in range(len(self.dataset)):
-                curr_train_info = self.train_actor_critic(self.dataset[i])
+                curr_train_info = self.train_actor_critic(self.dataset[i]) # 取出一个mini_batch
                 
                 if self.schedule_type == 'legacy':  
                     if self.multi_gpu:
@@ -286,8 +288,9 @@ class CommonAgent(a2c_continuous.A2CAgent):
 
         return train_info
 
-    def play_steps(self):
-        self.set_eval()
+    def play_steps(self):   
+        """ 与环境交互，收集一个horizon_length的数据"""
+        self.set_eval() # 切换到评估模式
         
         epinfos = []
         done_indices = []
@@ -299,25 +302,25 @@ class CommonAgent(a2c_continuous.A2CAgent):
 
             if self.use_action_masks:
                 masks = self.vec_env.get_action_masks()
-                res_dict = self.get_masked_action_values(self.obs, masks)
+                res_dict = self.get_masked_action_values(self.obs, masks) # 获取动作
             else:
                 res_dict = self.get_action_values(self.obs)
 
-            for k in update_list:
+            for k in update_list:   # 存储旧数据（动作、价值、logp等）
                 self.experience_buffer.update_data(k, n, res_dict[k]) 
 
             if self.has_central_value:
                 self.experience_buffer.update_data('states', n, self.obs['states'])
-
+            # 在环境里执行动作
             self.obs, rewards, self.dones, infos = self.env_step(res_dict['actions'])
             shaped_rewards = self.rewards_shaper(rewards)
-            self.experience_buffer.update_data('rewards', n, shaped_rewards)
+            self.experience_buffer.update_data('rewards', n, shaped_rewards) # 存储新数据
             self.experience_buffer.update_data('next_obses', n, self.obs['obs'])
             self.experience_buffer.update_data('dones', n, self.dones)
 
             terminated = infos['terminate'].float()
             terminated = terminated.unsqueeze(-1)
-            next_vals = self._eval_critic(self.obs)
+            next_vals = self._eval_critic(self.obs) # 评估下一个状态的价值
             next_vals *= (1.0 - terminated)
             self.experience_buffer.update_data('next_values', n, next_vals)
 
@@ -341,10 +344,10 @@ class CommonAgent(a2c_continuous.A2CAgent):
         mb_values = self.experience_buffer.tensor_dict['values']
         mb_next_values = self.experience_buffer.tensor_dict['next_values']
         mb_rewards = self.experience_buffer.tensor_dict['rewards']
-        
+        # 计算优势函数GAE和回报
         mb_advs = self.discount_values(mb_fdones, mb_values, mb_rewards, mb_next_values)
         mb_returns = mb_advs + mb_values
-
+        # 整理并返回数据
         batch_dict = self.experience_buffer.get_transformed_list(a2c_common.swap_and_flatten01, self.tensor_list)
         batch_dict['returns'] = a2c_common.swap_and_flatten01(mb_returns)
         batch_dict['played_frames'] = self.batch_size
@@ -352,6 +355,7 @@ class CommonAgent(a2c_continuous.A2CAgent):
         return batch_dict
 
     def prepare_dataset(self, batch_dict):
+        """ 对收集到的数据进行后处理，主要是计算advantage function和return，存入self.dataset"""
         obses = batch_dict['obses']
         returns = batch_dict['returns']
         dones = batch_dict['dones']
