@@ -1,0 +1,13 @@
+# 忽略模型和数据文件
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+
+# 忽略训练日志或中间结果
+checkpoints/
+logs/
+runs/
+output/
+
